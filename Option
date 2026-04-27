@@ -1,0 +1,82 @@
+import pandas as pd
+import numpy as np
+import re
+import torch
+from tqdm import tqdm
+
+# NLP 및 형태소 분석
+from kiwipiepy import Kiwi
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+
+# 토픽 모델링 및 감성 분석
+from gensim import corpora, models
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+
+# 1. 데이터 로드 및 초기 전처리
+# '옵션_Sbert'의 분석 단위(document/sentence) 설정을 반영한 전처리
+def clean_text(text):
+    text = str(text)
+    text = re.sub(r'[^가-힣\s]', ' ', text) # 한글만 남김
+    text = re.sub(r'\s+', ' ', text).strip() # 중복 공백 제거
+    return text
+
+df = pd.read_csv('option_raw_data.csv') # 데이터 파일명에 맞게 수정
+df['clean_body'] = df['text'].apply(clean_text)
+
+# 2. 형태소 분석 (Kiwi)
+kiwi = Kiwi()
+def extract_nouns(text):
+    try:
+        results = kiwi.analyze(text)
+        # 명사(N) 위주로 추출하며, 옵션 관련 단어(에어컨, 중문 등)를 보존
+        return [res.form for res in results[0][0] if res.tag.startswith('N') and len(res.form) > 1]
+    except:
+        return []
+
+df['tokens'] = df['clean_body'].apply(extract_nouns)
+
+# 3. SBERT 기반 Actor(옵션 고민 유형) 클러스터링
+print("Step 3: SBERT 임베딩 및 Actor 군집화...")
+model_sbert = SentenceTransformer('snunlp/KR-SBERT-V40-KRE-Guide')
+embeddings = model_sbert.encode(df['clean_body'].tolist(), show_progress_bar=True)
+
+# 아파트 옵션 고민의 성격에 따라 군집 수 설정 (예: 5개)
+num_clusters = 5
+kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+df['actor_cluster'] = kmeans.fit_predict(embeddings)
+
+# 4. LDA를 이용한 상세 옵션 항목(Action/Topic) 도출
+print("Step 4: LDA 토픽 모델링...")
+dictionary = corpora.Dictionary(df['tokens'])
+corpus = [dictionary.doc2bow(text) for text in df['tokens']]
+
+lda_model = models.LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_clusters, passes=15)
+
+# 5. KoELECTRA 기반 감성 분석 (기회 영역 도출)
+# 'ex03_기회영역분석' 노트북의 핵심인 KoELECTRA 감성 분류 적용
+print("Step 5: KoELECTRA 감성 분석 및 기회 영역 식별...")
+model_name = "monologg/koelectra-small-v3-discriminator" # 혹은 프로젝트에서 사용한 미세조정 모델 경로
+sentiment_classifier = pipeline("sentiment-analysis", model=model_name)
+
+def get_sentiment(text):
+    # 모델 입력 제한(512자) 고려
+    result = sentiment_classifier(text[:512])[0]
+    # 부정적인 반응이 많은 영역이 곧 개선이 필요한 '기회 영역'
+    return result['score'] if result['label'] == 'LABEL_1' else 1 - result['score']
+
+df['sentiment_score'] = df['clean_body'].apply(get_sentiment)
+
+# 6. 최종 분석 결과 요약 (Actor x Action Matrix)
+# 각 군집별로 어떤 옵션(Action)이 논의되고 감정 상태는 어떤지 집계
+option_analysis_report = df.groupby('actor_cluster').agg({
+    'clean_body': 'count',
+    'sentiment_score': 'mean',
+    'tokens': lambda x: [item for sublist in x for item in sublist][:10] # 주요 키워드 추출
+}).rename(columns={'clean_body': 'count', 'sentiment_score': 'avg_positivity'})
+
+# 결과 저장
+df.to_pickle("option_analysis_final.pkl")
+option_analysis_report.to_csv("option_summary_report.csv", encoding='utf-8-sig')
+
+print("분석 완료! 'option_summary_report.csv'를 확인하여 Key Accelerators의 근거 자료로 활용하세요.")
