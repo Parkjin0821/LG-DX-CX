@@ -1,0 +1,86 @@
+# 1. 라이브러리
+!pip install selenium pandas tqdm
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+import time
+import pandas as pd
+from tqdm import tqdm
+
+# 2. 드라이버 설정
+options = Options()
+options.add_argument('--headless')
+options.add_argument('--no-sandbox')
+options.add_argument('--disable-dev-shm-usage')
+
+driver = webdriver.Chrome(options=options)
+
+# 3. 키워드 & 목표
+query = "현관"
+TARGET = 10000
+
+data = []
+page = 1
+
+while len(data) < TARGET:
+    
+    # 🔥 기간 6개월 설정 URL
+    url = f"https://kin.naver.com/search/list.naver?query={query}&period=5y&page={page}"
+    driver.get(url)
+    time.sleep(1)
+
+    # 👉 링크 직접 가져오기 (핵심)
+    links = driver.find_elements(By.CSS_SELECTOR, "a")
+
+    href_list = []
+    for l in links:
+        href = l.get_attribute("href")
+        if href and "detail.naver" in href:
+            href_list.append(href)
+
+    # 중복 제거
+    href_list = list(set(href_list))
+
+    # 게시글 들어가기
+    for link in tqdm(href_list):
+        if len(data) >= TARGET:
+            break
+
+        try:
+            driver.get(link)
+            time.sleep(1)
+
+            # 제목
+            try:
+                title = driver.find_element(By.CSS_SELECTOR, ".title").text
+            except:
+                title = ""
+
+            # 질문
+            try:
+                question = driver.find_element(By.CSS_SELECTOR, ".c-heading__content").text
+            except:
+                question = ""
+
+            # 답변
+            answers = driver.find_elements(By.CSS_SELECTOR, "._endContentsText")
+            answer_text = " ".join([a.text for a in answers])
+
+            data.append({
+                "title": title,
+                "question": question,
+                "answer": answer_text
+            })
+
+        except:
+            continue
+
+    print(f"{len(data)}개 수집 완료")
+    page += 1
+
+# 저장
+df = pd.DataFrame(data)
+df.to_csv("naver_kin_현관_6개월.csv", index=False, encoding="utf-8-sig")
+
+print("완료!")
