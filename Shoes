@@ -1,0 +1,70 @@
+# 1. 필수 패키지 설치 및 환경 설정
+!pip install kiwipiepy umap-learn scikit-learn gensim matplotlib pandas tqdm sentence-transformers
+from google.colab import drive
+import pandas as pd
+import numpy as np
+import pickle
+from kiwipiepy import Kiwi
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import LatentDirichletAllocation
+from gensim.models.doc2vec import Doc2Vec, TaggedDocument
+from sentence_transformers import SentenceTransformer
+
+drive.mount('/content/drive')
+
+# 2. 데이터 로드 및 전처리 (현관_Sbert.ipynb 기반)
+RAW_CSV = "blind_raw.csv" # 실제 파일명으로 수정
+df = pd.read_csv(RAW_CSV)
+
+# 형태소 분석 (Kiwi)
+kiwi = Kiwi()
+def tokenize(text):
+    if not isinstance(text, str): return []
+    return [res.form for res in kiwi.tokenize(text) if res.tag.startswith('N') or res.tag.startswith('V')]
+
+df['tokens'] = df['clean_body'].apply(tokenize)
+df['tokens_str'] = df['tokens'].apply(lambda x: " ".join(x))
+
+# 3. 통합 분석 기법 (현관_Sbert.ipynb의 주요 방법론)
+
+# 방법 1: LDA (토픽 모델링)
+vectorizer = TfidfVectorizer(max_features=1000)
+tfidf_matrix = vectorizer.fit_transform(df['tokens_str'])
+lda_model = LatentDirichletAllocation(n_components=5, random_state=42)
+df['lda_topic'] = lda_model.fit_transform(tfidf_matrix).argmax(axis=1)
+
+# 방법 2: Doc2Vec
+documents = [TaggedDocument(doc, [i]) for i, doc in enumerate(df['tokens'])]
+d2v_model = Doc2Vec(documents, vector_size=100, window=5, min_count=2, workers=4)
+d2v_embeddings = np.array([d2v_model.infer_vector(doc) for doc in df['tokens']])
+
+# 방법 3: SBERT + KMeans (가장 추천되는 방식)
+sbert_model = SentenceTransformer('snunlp/KR-SBERT-V4-Conditional-Offsets')
+sbert_embeddings = sbert_model.encode(df['tokens_str'].tolist(), show_progress_bar=True)
+
+kmeans = KMeans(n_clusters=5, random_state=42)
+df['cluster_sbert'] = kmeans.fit_predict(sbert_embeddings)
+
+# 4. 액션 도출 (ex02_Action_도출 기반)
+# 분석된 군집(Actor)별로 Action을 정의하고 저장합니다.
+NUM_ACTORS = df['cluster_sbert'].nunique()
+for i in range(NUM_ACTORS):
+    actor_df = df[df['cluster_sbert'] == i].copy()
+    # 이 단계에서 각 군집의 특성을 바탕으로 action_cluster 등을 할당
+    actor_df.to_pickle(f"cluster_df_{i}_action.pkl")
+
+# 5. 최종 기회 영역 분석 및 통합 (ex03_기회영역분석 기반)
+all_actor_files = []
+for i in range(NUM_ACTORS):
+    try:
+        temp_df = pd.read_pickle(f"cluster_df_{i}_action.pkl")
+        all_actor_files.append(temp_df)
+    except FileNotFoundError:
+        continue
+
+final_df = pd.concat(all_actor_files, ignore_index=True)
+print(f"최종 데이터 통합 완료: {final_df.shape}")
+
+# 6. 결과 저장
+final_df.to_csv("final_total_analysis.csv", index=False, encoding="utf-8-sig")
