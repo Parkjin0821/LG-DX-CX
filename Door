@@ -1,0 +1,84 @@
+import pandas as pd
+import numpy as np
+import re
+import pickle
+from tqdm import tqdm
+
+# NLP 및 모델링 관련
+from kiwipiepy import Kiwi
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+from gensim import corpora, models
+import pyLDAvis.gensim_models
+from transformers import pipeline
+
+# 1. 데이터 로드 및 전처리 (현관 관련 데이터)
+def preprocess_text(text):
+    text = re.sub(r'[^가-힣\s]', '', str(text)) # 한글만 남기기
+    return text
+
+# 데이터 로딩 (파일명은 환경에 맞게 수정)
+df = pd.read_csv('blind_raw.csv') # 또는 전처리된 csv
+df['clean_text'] = df['text'].apply(preprocess_text)
+
+# 2. 형태소 분석 (Kiwi 이용)
+kiwi = Kiwi()
+def extract_nouns(text):
+    result = kiwi.analyze(text)
+    for res in result:
+        return [word.form for word in res[0] if word.tag.startswith('N') and len(word.form) > 1]
+    return []
+
+df['tokens'] = df['clean_text'].apply(extract_nouns)
+df['tokens_str'] = df['tokens'].apply(lambda x: ' '.join(x))
+
+# 3. SBERT를 이용한 Actor(사용자 유형) 클러스터링
+# '현관_Sbert' 노트북의 핵심 로직 반영
+print("SBERT 임베딩 및 Actor 클러스터링 시작...")
+model_sbert = SentenceTransformer('snunlp/KR-SBERT-V40-KRE-Guide')
+embeddings = model_sbert.encode(df['clean_text'].tolist(), show_progress_bar=True)
+
+# KMeans로 Actor 구분 (예: 5개 그룹)
+num_actors = 5
+kmeans_actor = KMeans(n_clusters=num_actors, random_state=42)
+df['actor_cluster'] = kmeans_actor.fit_predict(embeddings)
+
+# 4. LDA를 이용한 토픽 분석 (현관 내 주요 테마 추출)
+# LDA 분석 파이프라인 통합
+tokenized_docs = df['tokens'].tolist()
+dictionary = corpora.Dictionary(tokenized_docs)
+corpus = [dictionary.doc2bow(text) for text in tokenized_docs]
+
+lda_model = models.LdaModel(corpus, num_topics=num_actors, id2word=dictionary, passes=15)
+# 시각화 데이터 준비 (필요 시)
+# vis = pyLDAvis.gensim_models.prepare(lda_model, corpus, dictionary)
+
+# 5. Action(행동) 도출 및 감성 분석 (KoELECTRA 기반)
+# Action 도출 및 KoELECTRA 감성 분석 로직 통합
+print("Action 도출 및 감성 분석 시작...")
+classifier = pipeline("sentiment-analysis", model="monologg/koelectra-small-v3-discriminator")
+
+def get_sentiment_score(text):
+    # 긍정 확률 추출 로직 반영
+    result = classifier(text[:512])[0]
+    label = result['label'].lower()
+    score = result['score']
+    # 보통 모델이 0/1 또는 POS/NEG로 출력하므로 긍정 점수로 변환
+    return score if label in ('positive', '1', 'pos') else 1 - score
+
+df['sentiment_score'] = df['clean_text'].apply(get_sentiment_score)
+
+# 6. 결과 병합 및 저장
+# 각 Actor별로 어떤 Action이 주로 일어나는지 요약
+summary = df.groupby('actor_cluster').agg({
+    'clean_text': 'count',
+    'sentiment_score': 'mean',
+    'tokens_str': lambda x: ', '.join(x.iloc[0].split()[:5]) # 대표 키워드 5개
+}).rename(columns={'clean_text': 'count', 'tokens_str': 'top_keywords'})
+
+# 최종 데이터 저장
+df.to_pickle("./integrated_gate_analysis.pkl")
+summary.to_csv("./actor_action_summary.csv", encoding='utf-8-sig')
+
+print("모든 분석이 완료되었습니다. 'actor_action_summary.csv'를 확인하세요.")
+print(summary)
